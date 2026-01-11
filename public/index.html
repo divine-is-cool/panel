@@ -1,0 +1,361 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Divine Admin Panel</title>
+  <style>
+    :root{
+      --bg:#000000;
+      --gold:#FFD700;
+      --purple:#a34bff;
+      --panel: rgba(255,255,255,0.04);
+      --border: rgba(255,255,255,0.08);
+      --muted: rgba(255,215,0,0.85);
+      --danger:#ff3b3b;
+      --ok:#2ecc71;
+      --btn: linear-gradient(135deg, #e3b43a 12%, #a34bff 55%, #6d2bd6 100%);
+    }
+    *{ box-sizing:border-box; }
+    html,body{ height:100%; margin:0; font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, Arial; background:var(--bg); color:var(--gold); }
+    body{ display:flex; align-items:flex-start; justify-content:center; padding:32px 18px; }
+
+    .wrap{
+      width: 980px;
+      max-width: 96%;
+    }
+
+    .title{
+      font-size: 2.2rem;
+      font-weight: 900;
+      letter-spacing: 0.3px;
+      text-align:center;
+      margin: 10px 0 18px;
+    }
+    .subtitle{
+      text-align:center;
+      margin: 0 0 26px;
+      color: var(--muted);
+      font-weight: 700;
+    }
+
+    .card{
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      box-shadow: 0 18px 50px rgba(0,0,0,0.65);
+      padding: 20px;
+    }
+
+    .grid{
+      display:grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+    }
+    @media (max-width: 780px){
+      .grid{ grid-template-columns: 1fr; }
+    }
+
+    button.action{
+      width:100%;
+      border:none;
+      border-radius: 14px;
+      padding: 16px 14px;
+      color: #fff;
+      font-weight: 900;
+      font-size: 1.05rem;
+      cursor:pointer;
+      background: var(--btn);
+      box-shadow: 0 12px 34px rgba(0,0,0,0.55);
+      transition: transform .14s ease, box-shadow .14s ease;
+    }
+    button.action:hover{
+      transform: translateY(-4px);
+      box-shadow: 0 24px 60px rgba(79,56,168,0.44), 0 6px 22px rgba(0,0,0,0.32);
+    }
+
+    .status{
+      margin-top: 16px;
+      display:flex;
+      gap: 12px;
+      flex-wrap:wrap;
+      align-items:center;
+      justify-content:space-between;
+    }
+    .pill{
+      padding: 10px 12px;
+      border-radius: 999px;
+      border: 1px solid rgba(255,255,255,0.10);
+      background: rgba(255,255,255,0.03);
+      font-weight: 800;
+      color: var(--muted);
+    }
+    .pill strong{ color: var(--gold); }
+
+    .msg{
+      margin-top: 10px;
+      min-height: 24px;
+      font-weight: 800;
+    }
+    .msg.ok{ color: var(--ok); }
+    .msg.err{ color: var(--danger); }
+
+    /* Modal */
+    .overlay{
+      position:fixed;
+      inset:0;
+      background: rgba(0,0,0,0.68);
+      display:none;
+      align-items:center;
+      justify-content:center;
+      padding: 18px;
+      z-index: 9999;
+    }
+    .overlay.open{ display:flex; }
+    .modal{
+      width: 560px;
+      max-width: 96%;
+      background: linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.03));
+      border: 1px solid rgba(255,255,255,0.10);
+      border-radius: 16px;
+      box-shadow: 0 18px 50px rgba(3,9,18,0.7);
+      padding: 18px;
+      color: var(--gold);
+    }
+    .modal h2{
+      margin: 0 0 12px;
+      font-size: 1.3rem;
+      font-weight: 900;
+      text-align:center;
+    }
+    .row{ display:flex; flex-direction:column; gap:10px; }
+    input, textarea{
+      width:100%;
+      border-radius: 12px;
+      border: 1px solid rgba(255,255,255,0.10);
+      background: rgba(0,0,0,0.35);
+      color: #fff;
+      padding: 12px 12px;
+      font-size: 1rem;
+      outline:none;
+    }
+    textarea{ min-height: 110px; resize: vertical; }
+    .modal .btnrow{
+      display:flex;
+      gap: 10px;
+      margin-top: 12px;
+      justify-content:center;
+      flex-wrap:wrap;
+    }
+    .btn{
+      border:none;
+      border-radius: 12px;
+      padding: 12px 16px;
+      font-weight: 900;
+      cursor:pointer;
+      color:#fff;
+      background: rgba(255,255,255,0.10);
+    }
+    .btn.primary{ background: var(--btn); }
+    .btn.danger{ background: rgba(255,59,59,0.22); border: 1px solid rgba(255,59,59,0.35); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="title">Divine Admin Panel</div>
+    <div class="subtitle">Broadcast messages and control lockdown for the main site.</div>
+
+    <div class="card">
+      <div class="grid">
+        <button class="action" id="broadcastBtn">Broadcast Message</button>
+        <button class="action" id="lockdownBtn">Initiate Lockdown</button>
+        <button class="action" id="clearLockBtn">Clear Lockdown</button>
+      </div>
+
+      <div class="status">
+        <div class="pill">Lockdown: <strong id="lockdownState">…</strong></div>
+        <div class="pill">Broadcast active: <strong id="broadcastState">…</strong></div>
+      </div>
+
+      <div class="msg" id="msg"></div>
+    </div>
+  </div>
+
+  <!-- Modal -->
+  <div class="overlay" id="overlay" role="dialog" aria-modal="true">
+    <div class="modal">
+      <h2 id="modalTitle">Action</h2>
+      <div class="row" id="modalBody"></div>
+      <div class="btnrow" id="modalButtons"></div>
+    </div>
+  </div>
+
+<script>
+(function(){
+  const overlay = document.getElementById("overlay");
+  const modalTitle = document.getElementById("modalTitle");
+  const modalBody = document.getElementById("modalBody");
+  const modalButtons = document.getElementById("modalButtons");
+
+  const broadcastBtn = document.getElementById("broadcastBtn");
+  const lockdownBtn = document.getElementById("lockdownBtn");
+  const clearLockBtn = document.getElementById("clearLockBtn");
+
+  const lockdownState = document.getElementById("lockdownState");
+  const broadcastState = document.getElementById("broadcastState");
+  const msgEl = document.getElementById("msg");
+
+  function setMsg(text, kind){
+    msgEl.textContent = text || "";
+    msgEl.className = "msg" + (kind ? " " + kind : "");
+  }
+
+  function closeModal(){
+    overlay.classList.remove("open");
+    modalBody.innerHTML = "";
+    modalButtons.innerHTML = "";
+  }
+
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) closeModal();
+  });
+
+  function openModal(title, build){
+    modalTitle.textContent = title;
+    modalBody.innerHTML = "";
+    modalButtons.innerHTML = "";
+    build();
+    overlay.classList.add("open");
+  }
+
+  async function fetchState(){
+    const res = await fetch("/api/state");
+    const json = await res.json();
+    if (!json.ok) throw new Error("Failed to load state");
+    lockdownState.textContent = json.lockdown && json.lockdown.enabled ? "ENABLED" : "OFF";
+    broadcastState.textContent = json.broadcast ? "YES" : "NO";
+  }
+
+  async function adminPost(path, pin, body){
+    const res = await fetch(path, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Admin-Pin": pin
+      },
+      body: body ? JSON.stringify(body) : "{}"
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok || !json.ok) {
+      throw new Error((json && json.error) ? json.error : "Request failed");
+    }
+    return json;
+  }
+
+  function promptPinAndRun(actionName, runner){
+    openModal(actionName, () => {
+      const pin = document.createElement("input");
+      pin.type = "password";
+      pin.placeholder = "Admin PIN";
+      pin.autocomplete = "off";
+
+      modalBody.appendChild(pin);
+
+      const cancel = document.createElement("button");
+      cancel.className = "btn";
+      cancel.textContent = "Cancel";
+      cancel.onclick = closeModal;
+
+      const next = document.createElement("button");
+      next.className = "btn primary";
+      next.textContent = "Continue";
+      next.onclick = async () => {
+        const p = pin.value.trim();
+        if (!p) return;
+        try {
+          closeModal();
+          setMsg("Working...", "");
+          await runner(p);
+          await fetchState();
+        } catch (e) {
+          setMsg(String(e && e.message ? e.message : e), "err");
+        }
+      };
+
+      modalButtons.appendChild(cancel);
+      modalButtons.appendChild(next);
+
+      setTimeout(() => pin.focus(), 0);
+    });
+  }
+
+  broadcastBtn.addEventListener("click", () => {
+    promptPinAndRun("Broadcast Message", async (pin) => {
+      openModal("Broadcast Message", () => {
+        const pinHold = document.createElement("input");
+        pinHold.type = "password";
+        pinHold.placeholder = "Admin PIN";
+        pinHold.value = pin;
+        pinHold.autocomplete = "off";
+
+        const ta = document.createElement("textarea");
+        ta.placeholder = "Type your broadcast message…";
+
+        modalBody.appendChild(pinHold);
+        modalBody.appendChild(ta);
+
+        const cancel = document.createElement("button");
+        cancel.className = "btn";
+        cancel.textContent = "Cancel";
+        cancel.onclick = closeModal;
+
+        const send = document.createElement("button");
+        send.className = "btn primary";
+        send.textContent = "Send";
+        send.onclick = async () => {
+          const p = pinHold.value.trim();
+          const message = ta.value.trim();
+          if (!p || !message) return;
+          try {
+            closeModal();
+            setMsg("Broadcasting...", "");
+            await adminPost("/api/broadcast", p, { message });
+            setMsg("Broadcast sent.", "ok");
+          } catch (e) {
+            setMsg(String(e && e.message ? e.message : e), "err");
+          } finally {
+            await fetchState().catch(()=>{});
+          }
+        };
+
+        modalButtons.appendChild(cancel);
+        modalButtons.appendChild(send);
+
+        setTimeout(() => ta.focus(), 0);
+      });
+    });
+  });
+
+  lockdownBtn.addEventListener("click", () => {
+    promptPinAndRun("Initiate Lockdown", async (pin) => {
+      await adminPost("/api/lockdown", pin, {});
+      setMsg("Lockdown enabled.", "ok");
+    });
+  });
+
+  clearLockBtn.addEventListener("click", () => {
+    promptPinAndRun("Clear Lockdown", async (pin) => {
+      await adminPost("/api/clear-lockdown", pin, {});
+      setMsg("Lockdown cleared.", "ok");
+    });
+  });
+
+  // Initial load
+  fetchState().catch(() => {
+    lockdownState.textContent = "…";
+    broadcastState.textContent = "…";
+  });
+})();
+</script>
+</body>
+</html>
