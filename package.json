@@ -1,0 +1,15 @@
+{
+  "name": "divine-admin-panel",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Divine Admin Panel (broadcast + lockdown) server for Divine static site",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "ws": "^8.18.0"
+  }
+}
