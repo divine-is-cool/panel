@@ -47,9 +47,10 @@
       padding: 20px;
     }
 
+    /* Actions laid out together */
     .grid{
       display:grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 14px;
     }
     @media (max-width: 780px){
@@ -129,7 +130,7 @@
       text-align:center;
     }
     .row{ display:flex; flex-direction:column; gap:10px; }
-    input, textarea{
+    input, textarea, select{
       width:100%;
       border-radius: 12px;
       border: 1px solid rgba(255,255,255,0.10);
@@ -140,6 +141,7 @@
       outline:none;
     }
     textarea{ min-height: 110px; resize: vertical; }
+
     .modal .btnrow{
       display:flex;
       gap: 10px;
@@ -158,18 +160,71 @@
     }
     .btn.primary{ background: var(--btn); }
     .btn.danger{ background: rgba(255,59,59,0.22); border: 1px solid rgba(255,59,59,0.35); }
+
+    /* Small helper text */
+    .help{
+      font-size: 0.95rem;
+      color: var(--muted);
+      font-weight: 700;
+      line-height: 1.35;
+    }
+
+    /* Access-lockdown toggle card (bottom) */
+    .subcard{
+      margin-top: 14px;
+      padding: 16px;
+      border-radius: 14px;
+      border: 1px solid rgba(255,255,255,0.08);
+      background: rgba(255,255,255,0.02);
+    }
+    .subcard h3{
+      margin: 0 0 6px;
+      font-size: 1.1rem;
+      font-weight: 900;
+      letter-spacing: 0.2px;
+      text-align: left;
+    }
+    .subrow{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap: 12px;
+      flex-wrap:wrap;
+      margin-top: 10px;
+    }
+    .toggle{
+      display:flex;
+      align-items:center;
+      gap: 10px;
+      font-weight: 900;
+      color: rgba(255,215,0,0.95);
+    }
+    .toggle input[type="checkbox"]{
+      width: 20px;
+      height: 20px;
+      accent-color: #FFD700;
+    }
+    .hint{
+      color: var(--muted);
+      font-weight: 700;
+      font-size: 0.95rem;
+      line-height: 1.35;
+      margin-top: 8px;
+    }
   </style>
 </head>
 <body>
   <div class="wrap">
     <div class="title">Divine Admin Panel</div>
-    <div class="subtitle">Broadcast messages and control lockdown for the main site.</div>
+    <div class="subtitle">Broadcast messages, control lockdown, and ban/unban users by clientID.</div>
 
     <div class="card">
       <div class="grid">
         <button class="action" id="broadcastBtn">Broadcast Message</button>
         <button class="action" id="lockdownBtn">Initiate Lockdown</button>
+        <button class="action" id="banBtn">Ban User</button>
         <button class="action" id="clearLockBtn">Clear Lockdown</button>
+        <button class="action" id="unbanBtn">Unban User</button>
       </div>
 
       <div class="status">
@@ -178,6 +233,25 @@
       </div>
 
       <div class="msg" id="msg"></div>
+
+      <!-- Access-lockdown toggle (controls whether unknown/new clientIDs are allowed in) -->
+      <div class="subcard" id="accessCard">
+        <h3>Access Lockdown (new users)</h3>
+        <div class="hint">
+          When enabled, only <strong>known unbanned</strong> clientIDs are allowed. Unknown/new clientIDs are treated as banned until they become known (e.g. by authenticating).
+        </div>
+
+        <div class="subrow">
+          <label class="toggle" for="accessLockToggle">
+            <input id="accessLockToggle" type="checkbox" />
+            <span>Block new/unknown users</span>
+          </label>
+
+          <button class="btn primary" id="saveAccessLockBtn">Save</button>
+        </div>
+
+        <div class="hint" id="accessLockStateHint">Current: …</div>
+      </div>
     </div>
   </div>
 
@@ -200,10 +274,49 @@
   const broadcastBtn = document.getElementById("broadcastBtn");
   const lockdownBtn = document.getElementById("lockdownBtn");
   const clearLockBtn = document.getElementById("clearLockBtn");
+  const banBtn = document.getElementById("banBtn");
+  const unbanBtn = document.getElementById("unbanBtn");
 
   const lockdownState = document.getElementById("lockdownState");
   const broadcastState = document.getElementById("broadcastState");
   const msgEl = document.getElementById("msg");
+
+  // Access-lockdown UI
+  const accessLockToggle = document.getElementById("accessLockToggle");
+  const saveAccessLockBtn = document.getElementById("saveAccessLockBtn");
+  const accessLockStateHint = document.getElementById("accessLockStateHint");
+
+  // Brute-force pushback (client-side): after ANY wrong admin PIN (401), lock UI for 60s.
+  // Note: real protection should also be done server-side, but this provides immediate friction.
+  const PIN_LOCK_KEY = "divine.admin.pinLockUntilMs";
+  const PIN_LOCK_SECONDS = 60;
+
+  function nowMs(){ return Date.now(); }
+
+  function getPinLockUntil(){
+    try { return parseInt(localStorage.getItem(PIN_LOCK_KEY) || "0", 10) || 0; }
+    catch (e) { return 0; }
+  }
+
+  function setPinLockUntil(ms){
+    try { localStorage.setItem(PIN_LOCK_KEY, String(ms)); }
+    catch (e) {}
+  }
+
+  function clearPinLock(){
+    try { localStorage.removeItem(PIN_LOCK_KEY); }
+    catch (e) {}
+  }
+
+  function pinLockRemainingSeconds(){
+    const until = getPinLockUntil();
+    if (nowMs() >= until) return 0;
+    return Math.ceil((until - nowMs()) / 1000);
+  }
+
+  function isPinLocked(){
+    return pinLockRemainingSeconds() > 0;
+  }
 
   function setMsg(text, kind){
     msgEl.textContent = text || "";
@@ -228,6 +341,35 @@
     overlay.classList.add("open");
   }
 
+  function setActionsDisabled(disabled){
+    const btns = [
+      broadcastBtn, lockdownBtn, clearLockBtn, banBtn, unbanBtn,
+      saveAccessLockBtn, accessLockToggle
+    ].filter(Boolean);
+
+    for (const b of btns) {
+      try { b.disabled = !!disabled; } catch (e) {}
+    }
+  }
+
+  function updatePinLockUI(){
+    const rem = pinLockRemainingSeconds();
+    if (rem <= 0) {
+      setActionsDisabled(false);
+      return;
+    }
+    setActionsDisabled(true);
+    setMsg("Too many wrong PIN attempts. Try again in " + rem + "s.", "err");
+    setTimeout(updatePinLockUI, 500);
+  }
+
+  function engagePinLock(){
+    const until = nowMs() + PIN_LOCK_SECONDS * 1000;
+    setPinLockUntil(until);
+    closeModal();
+    updatePinLockUI();
+  }
+
   async function fetchState(){
     const res = await fetch("/api/state");
     const json = await res.json();
@@ -245,7 +387,37 @@
       },
       body: body ? JSON.stringify(body) : "{}"
     });
+
     const json = await res.json().catch(() => ({}));
+
+    // If wrong pin => lockout
+    if (res.status === 401) {
+      engagePinLock();
+      throw new Error("Unauthorized");
+    }
+
+    if (!res.ok || !json.ok) {
+      throw new Error((json && json.error) ? json.error : "Request failed");
+    }
+    return json;
+  }
+
+  async function adminGet(path, pin){
+    const res = await fetch(path, {
+      method: "GET",
+      headers: {
+        "X-Admin-Pin": pin
+      }
+    });
+
+    const json = await res.json().catch(() => ({}));
+
+    // If wrong pin => lockout
+    if (res.status === 401) {
+      engagePinLock();
+      throw new Error("Unauthorized");
+    }
+
     if (!res.ok || !json.ok) {
       throw new Error((json && json.error) ? json.error : "Request failed");
     }
@@ -253,6 +425,11 @@
   }
 
   function promptPinAndRun(actionName, runner){
+    if (isPinLocked()) {
+      updatePinLockUI();
+      return;
+    }
+
     openModal(actionName, () => {
       const pin = document.createElement("input");
       pin.type = "password";
@@ -270,6 +447,7 @@
       next.className = "btn primary";
       next.textContent = "Continue";
       next.onclick = async () => {
+        if (isPinLocked()) { updatePinLockUI(); return; }
         const p = pin.value.trim();
         if (!p) return;
         try {
@@ -278,7 +456,10 @@
           await runner(p);
           await fetchState();
         } catch (e) {
-          setMsg(String(e && e.message ? e.message : e), "err");
+          // If we are pin-locked, message is already set by updatePinLockUI()
+          if (!isPinLocked()) {
+            setMsg(String(e && e.message ? e.message : e), "err");
+          }
         }
       };
 
@@ -292,6 +473,11 @@
   broadcastBtn.addEventListener("click", () => {
     promptPinAndRun("Broadcast Message", async (pin) => {
       openModal("Broadcast Message", () => {
+        const help = document.createElement("div");
+        help.className = "help";
+        help.textContent = "Send a broadcast to all connected clients (shows as a modal once per broadcast id).";
+        modalBody.appendChild(help);
+
         const pinHold = document.createElement("input");
         pinHold.type = "password";
         pinHold.placeholder = "Admin PIN";
@@ -313,6 +499,7 @@
         send.className = "btn primary";
         send.textContent = "Send";
         send.onclick = async () => {
+          if (isPinLocked()) { updatePinLockUI(); return; }
           const p = pinHold.value.trim();
           const message = ta.value.trim();
           if (!p || !message) return;
@@ -322,7 +509,7 @@
             await adminPost("/api/broadcast", p, { message });
             setMsg("Broadcast sent.", "ok");
           } catch (e) {
-            setMsg(String(e && e.message ? e.message : e), "err");
+            if (!isPinLocked()) setMsg(String(e && e.message ? e.message : e), "err");
           } finally {
             await fetchState().catch(()=>{});
           }
@@ -350,11 +537,165 @@
     });
   });
 
+  function openClientPickerModal(opts){
+    // opts: { title, helpText, pin, clients, actionLabel, actionKind, onRun(pin, clientID) }
+    openModal(opts.title, () => {
+      const help = document.createElement("div");
+      help.className = "help";
+      help.textContent = opts.helpText || "";
+      modalBody.appendChild(help);
+
+      const pinHold = document.createElement("input");
+      pinHold.type = "password";
+      pinHold.placeholder = "Admin PIN";
+      pinHold.value = opts.pin || "";
+      pinHold.autocomplete = "off";
+      modalBody.appendChild(pinHold);
+
+      const select = document.createElement("select");
+      const clients = Array.isArray(opts.clients) ? opts.clients : [];
+      for (const c of clients) {
+        const opt = document.createElement("option");
+        const id = (c && c.clientID) ? String(c.clientID) : "";
+        const status = (c && c.status) ? String(c.status) : "unbanned";
+        const lastSeenAt = (c && c.lastSeenAt) ? Number(c.lastSeenAt) : 0;
+
+        opt.value = id;
+        opt.textContent = id + "  —  " + status + (lastSeenAt ? ("  —  lastSeen " + new Date(lastSeenAt).toLocaleString()) : "");
+        select.appendChild(opt);
+      }
+      modalBody.appendChild(select);
+
+      const cancel = document.createElement("button");
+      cancel.className = "btn";
+      cancel.textContent = "Cancel";
+      cancel.onclick = closeModal;
+
+      const run = document.createElement("button");
+      run.className = "btn " + (opts.actionKind === "danger" ? "danger" : "primary");
+      run.textContent = opts.actionLabel || "Run";
+      run.onclick = async () => {
+        if (isPinLocked()) { updatePinLockUI(); return; }
+        const p = pinHold.value.trim();
+        const clientID = (select.value || "").trim();
+        if (!p || !clientID) return;
+
+        try {
+          closeModal();
+          setMsg((opts.actionLabel || "Working") + " " + clientID + "...", "");
+          await opts.onRun(p, clientID);
+        } catch (e) {
+          if (!isPinLocked()) setMsg(String(e && e.message ? e.message : e), "err");
+        } finally {
+          await fetchState().catch(()=>{});
+        }
+      };
+
+      modalButtons.appendChild(cancel);
+      modalButtons.appendChild(run);
+
+      setTimeout(() => select.focus(), 0);
+    });
+  }
+
+  banBtn.addEventListener("click", () => {
+    promptPinAndRun("Ban User", async (pin) => {
+      const data = await adminGet("/api/admin/list", pin);
+      const clients = (data && Array.isArray(data.clients)) ? data.clients : [];
+      if (!clients.length) {
+        setMsg("No known clients yet.", "err");
+        return;
+      }
+
+      openClientPickerModal({
+        title: "Ban User",
+        helpText: "Select a clientID to ban. Banned clients will be denied by /api/check and should be redirected to /banned on the site.",
+        pin,
+        clients,
+        actionLabel: "Ban Selected",
+        actionKind: "danger",
+        onRun: async (p, clientID) => {
+          await adminPost("/api/admin/ban", p, { clientID });
+          setMsg("Banned " + clientID + ".", "ok");
+        }
+      });
+    });
+  });
+
+  unbanBtn.addEventListener("click", () => {
+    promptPinAndRun("Unban User", async (pin) => {
+      const data = await adminGet("/api/admin/list", pin);
+      const clients = (data && Array.isArray(data.clients)) ? data.clients : [];
+      if (!clients.length) {
+        setMsg("No known clients yet.", "err");
+        return;
+      }
+
+      openClientPickerModal({
+        title: "Unban User",
+        helpText: "Select a clientID to unban. This will mark the client as allowed again.",
+        pin,
+        clients,
+        actionLabel: "Unban Selected",
+        actionKind: "primary",
+        onRun: async (p, clientID) => {
+          await adminPost("/api/admin/unban", p, { clientID });
+          setMsg("Unbanned " + clientID + ".", "ok");
+        }
+      });
+    });
+  });
+
+  // ---- Access-lockdown (block new/unknown users) toggle
+  async function refreshAccessLockUI(pin){
+    // Uses /api/admin/list response field "lockdown" (this is accessStore.lockdown on server)
+    const data = await adminGet("/api/admin/list", pin);
+    const enabled = !!(data && data.lockdown);
+    accessLockToggle.checked = enabled;
+    accessLockStateHint.textContent = "Current: " + (enabled ? "BLOCKING new/unknown users (ON)" : "Allowing new/unknown users (OFF)");
+  }
+
+  saveAccessLockBtn.addEventListener("click", () => {
+    promptPinAndRun("Access Lockdown", async (pin) => {
+      // ensure UI is up to date before applying
+      await refreshAccessLockUI(pin);
+
+      // apply desired state
+      const desired = !!accessLockToggle.checked;
+      await adminPost("/api/admin/lockdown", pin, { enabled: desired });
+
+      // re-fetch to confirm
+      await refreshAccessLockUI(pin);
+      setMsg("Access lockdown updated.", "ok");
+    });
+  });
+
+  accessLockToggle.addEventListener("change", () => {
+    // no auto-save; user must click Save. This avoids accidental toggles.
+    const desired = !!accessLockToggle.checked;
+    accessLockStateHint.textContent = "Pending: " + (desired ? "ON (will block new/unknown users)" : "OFF (will allow new/unknown users)") + " — click Save";
+  });
+
   // Initial load
   fetchState().catch(() => {
     lockdownState.textContent = "…";
     broadcastState.textContent = "…";
   });
+
+  // If a lock is already active (stored), enforce it on load
+  updatePinLockUI();
+
+  // Allow manual clearing by devs in console if needed:
+  // localStorage.removeItem("divine.admin.pinLockUntilMs")
+  window.__divine_admin_clear_pin_lock = function(){
+    clearPinLock();
+    setMsg("", "");
+    setActionsDisabled(false);
+  };
+
+  // Load current access-lockdown state on startup (prompts for PIN first)
+  // We do this via a small "silent" prompt: user clicks Save anyway to change it.
+  accessLockStateHint.textContent = "Current: (click Save to load/apply)";
 })();
 </script>
 </body>
