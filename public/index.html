@@ -14,6 +14,8 @@
       --muted: rgba(255,215,0,0.85);
       --danger:#ff3b3b;
       --ok:#2ecc71;
+      --warn:#ffcc33;
+      --sus:#ff8a2a;
       --btn: linear-gradient(135deg, #e3b43a 12%, #a34bff 55%, #6d2bd6 100%);
     }
     *{ box-sizing:border-box; }
@@ -114,7 +116,7 @@
     }
     .overlay.open{ display:flex; }
     .modal{
-      width: 560px;
+      width: 720px;
       max-width: 96%;
       background: linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.03));
       border: 1px solid rgba(255,255,255,0.10);
@@ -160,6 +162,10 @@
     }
     .btn.primary{ background: var(--btn); }
     .btn.danger{ background: rgba(255,59,59,0.22); border: 1px solid rgba(255,59,59,0.35); }
+    .btn.ghost{ border: 1px solid rgba(255,255,255,0.10); background: transparent; }
+    .btn.ok{ background: rgba(46,204,113,0.18); border: 1px solid rgba(46,204,113,0.30); }
+    .btn.warn{ background: rgba(255,204,51,0.16); border: 1px solid rgba(255,204,51,0.28); }
+    .btn.sus{ background: rgba(255,138,42,0.16); border: 1px solid rgba(255,138,42,0.28); }
 
     /* Small helper text */
     .help{
@@ -211,12 +217,75 @@
       line-height: 1.35;
       margin-top: 8px;
     }
+
+    /* Manage Users list */
+    .userList{
+      display:flex;
+      flex-direction:column;
+      gap: 10px;
+      margin-top: 10px;
+    }
+    .userItem{
+      border: 1px solid rgba(255,255,255,0.08);
+      background: rgba(0,0,0,0.30);
+      border-radius: 14px;
+      padding: 12px;
+      display:flex;
+      flex-direction:column;
+      gap: 8px;
+    }
+    .userTop{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap: 12px;
+      flex-wrap:wrap;
+    }
+    .userMeta{
+      display:flex;
+      align-items:center;
+      gap: 10px;
+      flex-wrap:wrap;
+      font-weight: 900;
+    }
+    .dot{
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      display:inline-block;
+      box-shadow: 0 0 0 3px rgba(0,0,0,0.40);
+    }
+    .dot.verified{ background: var(--ok); }
+    .dot.unverified{ background: var(--warn); }
+    .dot.suspicious{ background: var(--sus); }
+    .dot.banned{ background: var(--danger); }
+
+    .kv{
+      display:flex;
+      flex-wrap:wrap;
+      gap: 10px 16px;
+      font-weight: 800;
+      color: rgba(255,215,0,0.92);
+    }
+    .kv span{
+      color: rgba(255,255,255,0.92);
+      font-weight: 800;
+    }
+    .mono{
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono","Courier New", monospace;
+    }
+    .actionsRow{
+      display:flex;
+      gap: 8px;
+      flex-wrap:wrap;
+      justify-content:flex-end;
+    }
   </style>
 </head>
 <body>
   <div class="wrap">
     <div class="title">Divine Admin Panel</div>
-    <div class="subtitle">Broadcast messages, control lockdown, and ban/unban users by clientID.</div>
+    <div class="subtitle">Broadcast messages, control lockdown, and manage users.</div>
 
     <div class="card">
       <div class="grid">
@@ -225,6 +294,7 @@
         <button class="action" id="banBtn">Ban User</button>
         <button class="action" id="clearLockBtn">Clear Lockdown</button>
         <button class="action" id="unbanBtn">Unban User</button>
+        <button class="action" id="manageBtn">Manage Users</button>
       </div>
 
       <div class="status">
@@ -236,15 +306,15 @@
 
       <!-- Access-lockdown toggle (controls whether unknown/new clientIDs are allowed in) -->
       <div class="subcard" id="accessCard">
-        <h3>Access Lockdown (new users)</h3>
+        <h3>Access Lockdown (verification)</h3>
         <div class="hint">
-          When enabled, only <strong>known unbanned</strong> clientIDs are allowed. Unknown/new clientIDs are treated as banned until they become known (e.g. by authenticating).
+          When enabled, only <strong>verified</strong> clientIDs are allowed. Unverified/suspicious/unknown will be blocked.
         </div>
 
         <div class="subrow">
           <label class="toggle" for="accessLockToggle">
             <input id="accessLockToggle" type="checkbox" />
-            <span>Block new/unknown users</span>
+            <span>Require verification</span>
           </label>
 
           <button class="btn primary" id="saveAccessLockBtn">Save</button>
@@ -276,6 +346,7 @@
   const clearLockBtn = document.getElementById("clearLockBtn");
   const banBtn = document.getElementById("banBtn");
   const unbanBtn = document.getElementById("unbanBtn");
+  const manageBtn = document.getElementById("manageBtn");
 
   const lockdownState = document.getElementById("lockdownState");
   const broadcastState = document.getElementById("broadcastState");
@@ -287,7 +358,6 @@
   const accessLockStateHint = document.getElementById("accessLockStateHint");
 
   // Brute-force pushback (client-side): after ANY wrong admin PIN (401), lock UI for 60s.
-  // Note: real protection should also be done server-side, but this provides immediate friction.
   const PIN_LOCK_KEY = "divine.admin.pinLockUntilMs";
   const PIN_LOCK_SECONDS = 60;
 
@@ -344,7 +414,7 @@
   function setActionsDisabled(disabled){
     const btns = [
       broadcastBtn, lockdownBtn, clearLockBtn, banBtn, unbanBtn,
-      saveAccessLockBtn, accessLockToggle
+      manageBtn, saveAccessLockBtn, accessLockToggle
     ].filter(Boolean);
 
     for (const b of btns) {
@@ -390,7 +460,6 @@
 
     const json = await res.json().catch(() => ({}));
 
-    // If wrong pin => lockout
     if (res.status === 401) {
       engagePinLock();
       throw new Error("Unauthorized");
@@ -412,7 +481,6 @@
 
     const json = await res.json().catch(() => ({}));
 
-    // If wrong pin => lockout
     if (res.status === 401) {
       engagePinLock();
       throw new Error("Unauthorized");
@@ -456,10 +524,7 @@
           await runner(p);
           await fetchState();
         } catch (e) {
-          // If we are pin-locked, message is already set by updatePinLockUI()
-          if (!isPinLocked()) {
-            setMsg(String(e && e.message ? e.message : e), "err");
-          }
+          if (!isPinLocked()) setMsg(String(e && e.message ? e.message : e), "err");
         }
       };
 
@@ -470,6 +535,326 @@
     });
   }
 
+  function openClientPickerModal(opts){
+    // opts: { title, helpText, pin, clients, actionLabel, actionKind, onRun(pin, clientID) }
+    openModal(opts.title, () => {
+      const help = document.createElement("div");
+      help.className = "help";
+      help.textContent = opts.helpText || "";
+      modalBody.appendChild(help);
+
+      const pinHold = document.createElement("input");
+      pinHold.type = "password";
+      pinHold.placeholder = "Admin PIN";
+      pinHold.value = opts.pin || "";
+      pinHold.autocomplete = "off";
+      modalBody.appendChild(pinHold);
+
+      const select = document.createElement("select");
+      const clients = Array.isArray(opts.clients) ? opts.clients : [];
+      for (const c of clients) {
+        const opt = document.createElement("option");
+        const id = (c && c.clientID) ? String(c.clientID) : "";
+        const status = (c && c.status) ? String(c.status) : "unverified";
+        const lastSeenAt = (c && c.lastSeenAt) ? Number(c.lastSeenAt) : 0;
+
+        opt.value = id;
+        opt.textContent = id + "  —  " + status + (lastSeenAt ? ("  —  lastSeen " + new Date(lastSeenAt).toLocaleString()) : "");
+        select.appendChild(opt);
+      }
+      modalBody.appendChild(select);
+
+      const cancel = document.createElement("button");
+      cancel.className = "btn";
+      cancel.textContent = "Cancel";
+      cancel.onclick = closeModal;
+
+      const run = document.createElement("button");
+      run.className = "btn " + (opts.actionKind === "danger" ? "danger" : "primary");
+      run.textContent = opts.actionLabel || "Run";
+      run.onclick = async () => {
+        if (isPinLocked()) { updatePinLockUI(); return; }
+        const p = pinHold.value.trim();
+        const clientID = (select.value || "").trim();
+        if (!p || !clientID) return;
+
+        try {
+          closeModal();
+          setMsg((opts.actionLabel || "Working") + " " + clientID + "...", "");
+          await opts.onRun(p, clientID);
+        } catch (e) {
+          if (!isPinLocked()) setMsg(String(e && e.message ? e.message : e), "err");
+        } finally {
+          await fetchState().catch(()=>{});
+        }
+      };
+
+      modalButtons.appendChild(cancel);
+      modalButtons.appendChild(run);
+
+      setTimeout(() => select.focus(), 0);
+    });
+  }
+
+  function statusDotClass(status){
+    const s = String(status || "").toLowerCase();
+    if (s === "verified") return "verified";
+    if (s === "suspicious") return "suspicious";
+    if (s === "banned") return "banned";
+    return "unverified";
+  }
+
+  function prettyBrowser(u){
+    const ua = String(u || "");
+    if (!ua) return "";
+    // Keep it short-ish
+    if (ua.length <= 90) return ua;
+    return ua.slice(0, 90) + "…";
+  }
+
+  function openManageUsers(pin){
+    openModal("Manage Users", () => {
+      const help = document.createElement("div");
+      help.className = "help";
+      help.textContent = "View users by clientID with status, IP, last seen, and browser. You can verify, ban (clientID or IP), or unban.";
+      modalBody.appendChild(help);
+
+      const pinHold = document.createElement("input");
+      pinHold.type = "password";
+      pinHold.placeholder = "Admin PIN";
+      pinHold.value = pin || "";
+      pinHold.autocomplete = "off";
+      modalBody.appendChild(pinHold);
+
+      const search = document.createElement("input");
+      search.placeholder = "Search clientID / IP / browser…";
+      modalBody.appendChild(search);
+
+      const list = document.createElement("div");
+      list.className = "userList";
+      modalBody.appendChild(list);
+
+      const cancel = document.createElement("button");
+      cancel.className = "btn";
+      cancel.textContent = "Close";
+      cancel.onclick = closeModal;
+
+      const refreshBtn = document.createElement("button");
+      refreshBtn.className = "btn ghost";
+      refreshBtn.textContent = "Refresh";
+
+      modalButtons.appendChild(cancel);
+      modalButtons.appendChild(refreshBtn);
+
+      let all = [];
+
+      function render(){
+        const q = (search.value || "").trim().toLowerCase();
+        list.innerHTML = "";
+
+        const filtered = !q ? all : all.filter((u) => {
+          const blob = [
+            u.clientID, u.ipLast, u.ipFirst, u.ua, u.platform, u.language, u.timezone
+          ].join(" ").toLowerCase();
+          return blob.includes(q);
+        });
+
+        for (const u of filtered) {
+          const item = document.createElement("div");
+          item.className = "userItem";
+
+          const top = document.createElement("div");
+          top.className = "userTop";
+
+          const meta = document.createElement("div");
+          meta.className = "userMeta";
+
+          const dot = document.createElement("span");
+          dot.className = "dot " + statusDotClass(u.status);
+
+          const id = document.createElement("span");
+          id.className = "mono";
+          id.textContent = u.clientID;
+
+          const st = document.createElement("span");
+          st.textContent = String(u.status || "unverified").toUpperCase();
+
+          meta.appendChild(dot);
+          meta.appendChild(id);
+          meta.appendChild(st);
+
+          const actions = document.createElement("div");
+          actions.className = "actionsRow";
+
+          const verifyBtn = document.createElement("button");
+          verifyBtn.className = "btn ok";
+          verifyBtn.textContent = "Verify User";
+          verifyBtn.style.display = (String(u.status).toLowerCase() === "verified") ? "none" : "inline-block";
+          verifyBtn.onclick = async () => {
+            const p = pinHold.value.trim();
+            if (!p) return;
+            await adminPost("/api/admin/verify", p, { clientID: u.clientID });
+            await load();
+          };
+
+          const unbanClientBtn = document.createElement("button");
+          unbanClientBtn.className = "btn primary";
+          unbanClientBtn.textContent = "Unban";
+          unbanClientBtn.style.display = (String(u.status).toLowerCase() === "banned") ? "inline-block" : "none";
+          unbanClientBtn.onclick = async () => {
+            const p = pinHold.value.trim();
+            if (!p) return;
+            await adminPost("/api/admin/unban", p, { clientID: u.clientID });
+            await load();
+          };
+
+          const clearSusBtn = document.createElement("button");
+          clearSusBtn.className = "btn warn";
+          clearSusBtn.textContent = "Clear Suspicious";
+          clearSusBtn.style.display = (String(u.status).toLowerCase() === "suspicious") ? "inline-block" : "none";
+          clearSusBtn.onclick = async () => {
+            const p = pinHold.value.trim();
+            if (!p) return;
+            await adminPost("/api/admin/clear-suspicious", p, { clientID: u.clientID });
+            await load();
+          };
+
+        const banBtn = document.createElement("button");
+          banBtn.className = "btn danger";
+          banBtn.textContent = "Ban…";
+          banBtn.onclick = () => {
+            const p = pinHold.value.trim();
+            if (!p) return;
+
+            openModal("Ban User", () => {
+              const h = document.createElement("div");
+              h.className = "help";
+              h.textContent = "Ban by clientID or ban by IP. Optional ban message will be shown on /banned.";
+              modalBody.appendChild(h);
+
+              const pin2 = document.createElement("input");
+              pin2.type = "password";
+              pin2.placeholder = "Admin PIN";
+              pin2.value = p;
+              modalBody.appendChild(pin2);
+
+              const mode = document.createElement("select");
+              const optA = document.createElement("option");
+              optA.value = "client";
+              optA.textContent = "Ban Client ID";
+              const optB = document.createElement("option");
+              optB.value = "ip";
+              optB.textContent = "Ban IP";
+              mode.appendChild(optA);
+              mode.appendChild(optB);
+              modalBody.appendChild(mode);
+
+              const target = document.createElement("input");
+              target.placeholder = "Target (clientID or IP)";
+              target.value = u.clientID;
+              modalBody.appendChild(target);
+
+              const msg = document.createElement("textarea");
+              msg.placeholder = "Ban message (shown on banned page)…";
+              msg.value = u.banMessage || "";
+              modalBody.appendChild(msg);
+
+              mode.addEventListener("change", () => {
+                const m = mode.value;
+                if (m === "client") target.value = u.clientID;
+                if (m === "ip") target.value = u.ipLast || "";
+              });
+
+              const cancel2 = document.createElement("button");
+              cancel2.className = "btn";
+              cancel2.textContent = "Cancel";
+              cancel2.onclick = closeModal;
+
+              const doIt = document.createElement("button");
+              doIt.className = "btn danger";
+              doIt.textContent = "Ban";
+              doIt.onclick = async () => {
+                const ppp = pin2.value.trim();
+                const m = mode.value;
+                const t = target.value.trim();
+                const bm = msg.value.trim();
+                if (!ppp || !t) return;
+
+                closeModal();
+                setMsg("Banning...", "");
+
+                if (m === "client") {
+                  await adminPost("/api/admin/ban", ppp, { clientID: t, banMessage: bm });
+                } else {
+                  await adminPost("/api/admin/ban-ip", ppp, { ip: t, banMessage: bm });
+                }
+
+                setMsg("Ban applied.", "ok");
+                await load();
+              };
+
+              modalButtons.appendChild(cancel2);
+              modalButtons.appendChild(doIt);
+            });
+          };
+
+        actions.appendChild(verifyBtn);
+          actions.appendChild(clearSusBtn);
+          actions.appendChild(unbanClientBtn);
+          actions.appendChild(banBtn);
+
+          top.appendChild(meta);
+          top.appendChild(actions);
+
+          const kv = document.createElement("div");
+          kv.className = "kv";
+
+          const ip = document.createElement("div");
+          ip.innerHTML = "IP: <span class='mono'>" + (u.ipLast || "(none)") + "</span>";
+
+          const seen = document.createElement("div");
+          seen.innerHTML = "Last seen: <span>" + (u.lastSeenAt ? new Date(u.lastSeenAt).toLocaleString() : "(unknown)") + "</span>";
+
+          const br = document.createElement("div");
+          br.innerHTML = "Browser: <span>" + (prettyBrowser(u.ua) || "(unknown)") + "</span>";
+
+          kv.appendChild(ip);
+          kv.appendChild(seen);
+          kv.appendChild(br);
+
+          item.appendChild(top);
+          item.appendChild(kv);
+
+          list.appendChild(item);
+        }
+
+        if (!filtered.length) {
+          const empty = document.createElement("div");
+          empty.className = "help";
+          empty.textContent = "No matching users.";
+          list.appendChild(empty);
+          }
+      }
+
+      async function load(){
+        const p = pinHold.value.trim();
+        if (!p) return;
+        const data = await adminGet("/api/admin/list", p);
+        all = Array.isArray(data.clients) ? data.clients : [];
+        render();
+      }
+
+      refreshBtn.onclick = load;
+      search.addEventListener("input", render);
+
+      // initial load
+      load().catch((e) => {
+        setMsg(String(e && e.message ? e.message : e), "err");
+      });
+    });
+  }
+
+  // Broadcast
   broadcastBtn.addEventListener("click", () => {
     promptPinAndRun("Broadcast Message", async (pin) => {
       openModal("Broadcast Message", () => {
@@ -523,6 +908,7 @@
     });
   });
 
+   // Site lockdown
   lockdownBtn.addEventListener("click", () => {
     promptPinAndRun("Initiate Lockdown", async (pin) => {
       await adminPost("/api/lockdown", pin, {});
@@ -537,67 +923,7 @@
     });
   });
 
-  function openClientPickerModal(opts){
-    // opts: { title, helpText, pin, clients, actionLabel, actionKind, onRun(pin, clientID) }
-    openModal(opts.title, () => {
-      const help = document.createElement("div");
-      help.className = "help";
-      help.textContent = opts.helpText || "";
-      modalBody.appendChild(help);
-
-      const pinHold = document.createElement("input");
-      pinHold.type = "password";
-      pinHold.placeholder = "Admin PIN";
-      pinHold.value = opts.pin || "";
-      pinHold.autocomplete = "off";
-      modalBody.appendChild(pinHold);
-
-      const select = document.createElement("select");
-      const clients = Array.isArray(opts.clients) ? opts.clients : [];
-      for (const c of clients) {
-        const opt = document.createElement("option");
-        const id = (c && c.clientID) ? String(c.clientID) : "";
-        const status = (c && c.status) ? String(c.status) : "unbanned";
-        const lastSeenAt = (c && c.lastSeenAt) ? Number(c.lastSeenAt) : 0;
-
-        opt.value = id;
-        opt.textContent = id + "  —  " + status + (lastSeenAt ? ("  —  lastSeen " + new Date(lastSeenAt).toLocaleString()) : "");
-        select.appendChild(opt);
-      }
-      modalBody.appendChild(select);
-
-      const cancel = document.createElement("button");
-      cancel.className = "btn";
-      cancel.textContent = "Cancel";
-      cancel.onclick = closeModal;
-
-      const run = document.createElement("button");
-      run.className = "btn " + (opts.actionKind === "danger" ? "danger" : "primary");
-      run.textContent = opts.actionLabel || "Run";
-      run.onclick = async () => {
-        if (isPinLocked()) { updatePinLockUI(); return; }
-        const p = pinHold.value.trim();
-        const clientID = (select.value || "").trim();
-        if (!p || !clientID) return;
-
-        try {
-          closeModal();
-          setMsg((opts.actionLabel || "Working") + " " + clientID + "...", "");
-          await opts.onRun(p, clientID);
-        } catch (e) {
-          if (!isPinLocked()) setMsg(String(e && e.message ? e.message : e), "err");
-        } finally {
-          await fetchState().catch(()=>{});
-        }
-      };
-
-      modalButtons.appendChild(cancel);
-      modalButtons.appendChild(run);
-
-      setTimeout(() => select.focus(), 0);
-    });
-  }
-
+  // Legacy quick ban/unban pickers
   banBtn.addEventListener("click", () => {
     promptPinAndRun("Ban User", async (pin) => {
       const data = await adminGet("/api/admin/list", pin);
@@ -609,7 +935,7 @@
 
       openClientPickerModal({
         title: "Ban User",
-        helpText: "Select a clientID to ban. Banned clients will be denied by /api/check and should be redirected to /banned on the site.",
+        helpText: "Select a clientID to ban. (For IP ban + message, use Manage Users.)",
         pin,
         clients,
         actionLabel: "Ban Selected",
@@ -633,7 +959,7 @@
 
       openClientPickerModal({
         title: "Unban User",
-        helpText: "Select a clientID to unban. This will mark the client as allowed again.",
+        helpText: "Select a clientID to unban. This will set them back to UNVERIFIED.",
         pin,
         clients,
         actionLabel: "Unban Selected",
@@ -646,34 +972,35 @@
     });
   });
 
-  // ---- Access-lockdown (block new/unknown users) toggle
+  // Manage users
+  manageBtn.addEventListener("click", () => {
+    promptPinAndRun("Manage Users", async (pin) => {
+      openManageUsers(pin);
+    });
+  });
+
+  // ---- Access-lockdown (require verification) toggle
   async function refreshAccessLockUI(pin){
-    // Uses /api/admin/list response field "lockdown" (this is accessStore.lockdown on server)
     const data = await adminGet("/api/admin/list", pin);
     const enabled = !!(data && data.lockdown);
     accessLockToggle.checked = enabled;
-    accessLockStateHint.textContent = "Current: " + (enabled ? "BLOCKING new/unknown users (ON)" : "Allowing new/unknown users (OFF)");
+    accessLockStateHint.textContent = "Current: " + (enabled ? "REQUIRE VERIFIED (ON)" : "Allow unverified/new users (OFF)");
   }
 
   saveAccessLockBtn.addEventListener("click", () => {
     promptPinAndRun("Access Lockdown", async (pin) => {
-      // ensure UI is up to date before applying
       await refreshAccessLockUI(pin);
-
-      // apply desired state
       const desired = !!accessLockToggle.checked;
       await adminPost("/api/admin/lockdown", pin, { enabled: desired });
 
-      // re-fetch to confirm
       await refreshAccessLockUI(pin);
       setMsg("Access lockdown updated.", "ok");
     });
   });
 
   accessLockToggle.addEventListener("change", () => {
-    // no auto-save; user must click Save. This avoids accidental toggles.
     const desired = !!accessLockToggle.checked;
-    accessLockStateHint.textContent = "Pending: " + (desired ? "ON (will block new/unknown users)" : "OFF (will allow new/unknown users)") + " — click Save";
+    accessLockStateHint.textContent = "Pending: " + (desired ? "ON (require verified users)" : "OFF (allow new users)") + " — click Save";
   });
 
   // Initial load
@@ -682,19 +1009,14 @@
     broadcastState.textContent = "…";
   });
 
-  // If a lock is already active (stored), enforce it on load
   updatePinLockUI();
 
-  // Allow manual clearing by devs in console if needed:
-  // localStorage.removeItem("divine.admin.pinLockUntilMs")
   window.__divine_admin_clear_pin_lock = function(){
     clearPinLock();
     setMsg("", "");
     setActionsDisabled(false);
   };
 
-  // Load current access-lockdown state on startup (prompts for PIN first)
-  // We do this via a small "silent" prompt: user clicks Save anyway to change it.
   accessLockStateHint.textContent = "Current: (click Save to load/apply)";
 })();
 </script>
