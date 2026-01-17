@@ -2,7 +2,7 @@
 // - WebSocket for pushing events to connected clients on the Divine static site
 // - HTTP API for admin actions (PIN-protected) (broadcast + site lockdown admin actions)
 // - Public state endpoint for static clients to fetch on load
-// - ClientID access control system (bans + access-lockdown + self-unban with PIN)
+// - ClientID access control system (bans + access-lockdown + verification + suspicious)
 // - Server-side PIN validation for the static "Access Restricted" gate (/api/auth)
 //
 // ENV:
@@ -19,6 +19,12 @@ const { WebSocketServer } = require("ws");
 const app = express();
 app.disable("x-powered-by");
 app.use(express.json({ limit: "256kb" }));
+
+// If you deploy behind a reverse proxy (Render/Railway/Cloudflare/etc.),
+// set TRUST_PROXY=1 so req.ip becomes the real client IP.
+if (String(process.env.TRUST_PROXY || "") === "1") {
+  app.set("trust proxy", 1);
+}
 
 // ---- Config
 const ADMIN_PIN = process.env.ADMIN_PIN || "";
@@ -44,7 +50,32 @@ function makeId() {
 }
 
 function safeJsonParse(raw, fallback) {
-  try { return JSON.parse(raw); } catch (e) { return fallback; }
+  try {
+    return JSON.parse(raw);
+  } catch (e) {
+    return fallback;
+  }
+}
+
+function normalizeStr(x) {
+  return typeof x === "string" ? x.trim() : "";
+}
+
+function clampStr(s, maxLen) {
+  const x = normalizeStr(s);
+  if (!x) return "";
+  if (x.length <= maxLen) return x;
+  return x.slice(0, maxLen);
+}
+
+function getRequestIP(req) {
+  // With trust proxy, req.ip is derived from x-forwarded-for properly.
+  // Without trust proxy, it will be remoteAddress.
+  return normalizeStr(req.ip || req.socket?.remoteAddress || "");
+}
+
+function formatUA(ua) {
+  return clampStr(ua, 300);
 }
 
 // ---- State (broadcast + site-lockdown used by /api/state)
@@ -89,10 +120,11 @@ function pruneExpiredBroadcast() {
   }
 }
 
-// ---- Access Control Store (clientID bans + access-lockdown)
+// ---- Access Control Store (clientID bans + access-lockdown + status + ip bans)
 const accessStore = {
   lockdown: false, // access-lockdown (NOT the same as state.lockdown)
-  clients: {}
+  clients: {},
+  ipBans: {} // { [ip]: { message, createdAt, updatedAt } }
 };
 
 function loadAccess() {
@@ -105,6 +137,7 @@ function loadAccess() {
 
     if (typeof parsed.lockdown === "boolean") accessStore.lockdown = parsed.lockdown;
     if (parsed.clients && typeof parsed.clients === "object") accessStore.clients = parsed.clients;
+    if (parsed.ipBans && typeof parsed.ipBans === "object") accessStore.ipBans = parsed.ipBans;
   } catch (e) {
     console.warn("Failed to load access store:", e);
   }
@@ -119,8 +152,17 @@ function saveAccess() {
   }
 }
 
-function normalizeStr(x) {
-  return (typeof x === "string") ? x.trim() : "";
+function normalizeLegacyStatus(status) {
+  // Back-compat with your old values.
+  // Old: "unbanned" meant allowed. New model: "unverified" default.
+  const s = normalizeStr(status).toLowerCase();
+  if (!s) return "unverified";
+  if (s === "unbanned") return "unverified";
+  if (s === "banned") return "banned";
+  if (s === "verified") return "verified";
+  if (s === "unverified") return "unverified";
+  if (s === "suspicious") return "suspicious";
+  return "unverified";
 }
 
 function ensureClientRecord(clientID) {
@@ -130,17 +172,96 @@ function ensureClientRecord(clientID) {
   const existing = accessStore.clients[id];
   if (existing && typeof existing === "object") {
     existing.lastSeenAt = nowMs();
+    existing.status = normalizeLegacyStatus(existing.status);
     return existing;
   }
 
-  const rec = { status: "unbanned", firstSeenAt: nowMs(), lastSeenAt: nowMs() };
+  const rec = {
+    status: "unverified",
+    firstSeenAt: nowMs(),
+    lastSeenAt: nowMs(),
+    verifiedAt: 0,
+    suspiciousAt: 0,
+
+    // telemetry
+    ua: "",
+    platform: "",
+    language: "",
+    timezone: "",
+    screen: "",
+
+    // ip tracking
+    ipFirst: "",
+    ipLast: "",
+    ipLastSeenAt: 0,
+
+    // ban message (client ban)
+    banMessage: ""
+  };
+
   accessStore.clients[id] = rec;
   saveAccess();
   return rec;
 }
 
-function computeAccessDecision(clientID) {
+function recordClientTelemetry(req, clientID, device) {
+  const rec = ensureClientRecord(clientID);
+  if (!rec) return;
+
+  const ip = getRequestIP(req);
+  const ua = formatUA(req.headers["user-agent"] || "");
+
+  if (!rec.ipFirst && ip) rec.ipFirst = ip;
+  if (ip) {
+    rec.ipLast = ip;
+    rec.ipLastSeenAt = nowMs();
+  }
+
+  // Prefer explicit device payload if provided, else at least store UA.
+  const d = device && typeof device === "object" ? device : {};
+  rec.ua = formatUA(d.ua || ua);
+  rec.platform = clampStr(d.platform || "", 80);
+  rec.language = clampStr(d.language || "", 40);
+  rec.timezone = clampStr(d.timezone || "", 64);
+  rec.screen = clampStr(d.screen || "", 32);
+
+  rec.lastSeenAt = nowMs();
+  saveAccess();
+}
+
+function isDesktopish(rec) {
+  // Very rough heuristic based on stored platform/ua. This is not security; it's just an ops heuristic.
+  const ua = String(rec && rec.ua ? rec.ua : "").toLowerCase();
+  const platform = String(rec && rec.platform ? rec.platform : "").toLowerCase();
+
+  if (platform.includes("win")) return true;
+  if (platform.includes("mac")) return true;
+  if (ua.includes("windows")) return true;
+  if (ua.includes("mac os")) return true;
+
+  return false;
+}
+
+function ipBanDecision(ip) {
+  const x = normalizeStr(ip);
+  if (!x) return null;
+  const rec = accessStore.ipBans && accessStore.ipBans[x];
+  if (!rec || typeof rec !== "object") return null;
+  return {
+    banned: true,
+    reason: "ip_ban",
+    banMessage: clampStr(rec.message || "", 500)
+  };
+}
+
+function computeAccessDecision(req, clientID) {
   const id = normalizeStr(clientID);
+  const ip = getRequestIP(req);
+
+  // IP ban takes precedence
+  const ipBan = ipBanDecision(ip);
+  if (ipBan) return { ...ipBan, allowed: false };
+
   if (!id) {
     if (accessStore.lockdown) return { banned: true, allowed: false, reason: "missing_client_id" };
     return { banned: false, allowed: true, reason: "missing_client_id_allowed" };
@@ -149,14 +270,46 @@ function computeAccessDecision(clientID) {
   const rec = accessStore.clients[id];
   const isKnown = !!rec;
 
-  if (isKnown && rec && rec.status === "banned") return { banned: true, allowed: false, reason: "known_banned" };
+  if (isKnown && rec) rec.status = normalizeLegacyStatus(rec.status);
+
+  if (isKnown && rec && rec.status === "banned") {
+    return {
+      banned: true,
+      allowed: false,
+      reason: "client_ban",
+      status: "banned",
+      banMessage: clampStr(rec.banMessage || "", 500)
+    };
+  }
+
+  if (isKnown && rec && rec.status === "suspicious") {
+    return { banned: false, allowed: true, reason: "client_suspicious", status: "suspicious" };
+  }
+
+  // Device targeting -> mark suspicious (server-side, not purely client)
+  // Only applies if they're currently NOT verified/banned.
+  if (isKnown && rec && rec.status === "unverified" && isDesktopish(rec)) {
+    // Keep it sticky; once suspicious, stay until admin verifies/clears.
+    rec.status = "suspicious";
+    rec.suspiciousAt = nowMs();
+    saveAccess();
+    return { banned: false, allowed: true, reason: "desktop_unverified_marked_suspicious", status: "suspicious" };
+  }
 
   if (accessStore.lockdown) {
     if (!isKnown) return { banned: true, allowed: false, reason: "lockdown_unknown" };
-    return { banned: false, allowed: true, reason: "lockdown_known_unbanned" };
+
+    // In lockdown mode, only allow verified (and optionally unverified if you want).
+    // You asked for “manual authorize”, so deny unverified/suspicious when lockdown is ON.
+    const st = normalizeLegacyStatus(rec.status);
+    if (st !== "verified") return { banned: true, allowed: false, reason: "lockdown_not_verified", status: st };
+    return { banned: false, allowed: true, reason: "lockdown_verified", status: st };
   }
 
-  return { banned: false, allowed: true, reason: isKnown ? "known_unbanned" : "unknown_allowed" };
+  // Normal mode:
+  // - unknown allowed
+  // - known allowed unless banned; suspicious will be handled by client redirect to /suspicious
+  return { banned: false, allowed: true, reason: isKnown ? "known_allowed" : "unknown_allowed", status: isKnown ? rec.status : "unverified" };
 }
 
 // ---- Admin auth (ADMIN_PIN header)
@@ -187,6 +340,23 @@ app.get("/api/state", (req, res) => {
   res.json({ ok: true, lockdown: state.lockdown, broadcast: state.broadcast });
 });
 
+// ---- Telemetry / presence (static site calls this)
+app.post("/api/hello", (req, res) => {
+  const clientID = normalizeStr(req.body && req.body.clientID);
+  const device = (req.body && typeof req.body.device === "object") ? req.body.device : null;
+
+  if (!clientID) return res.status(400).json({ ok: false, error: "clientID required" });
+
+  recordClientTelemetry(req, clientID, device);
+
+  const rec = ensureClientRecord(clientID);
+  res.json({
+    ok: true,
+    clientID,
+    status: rec ? normalizeLegacyStatus(rec.status) : "unverified"
+  });
+});
+
 // ---- Server-side "Access Restricted" PIN validation
 // POST /api/auth
 // Body: { clientID, pinAttempt }
@@ -195,19 +365,20 @@ app.post("/api/auth", (req, res) => {
   const clientID = normalizeStr(req.body && req.body.clientID);
   const pinAttempt = normalizeStr(req.body && req.body.pinAttempt);
 
-  // Track as known (optional but useful)
-  if (clientID) ensureClientRecord(clientID);
+  if (clientID) recordClientTelemetry(req, clientID, null);
 
   if (!AUTH_PIN) return res.json({ ok: true, allowed: false });
 
   const allowed = pinAttempt === AUTH_PIN;
 
-  // Optional: if they successfully authenticate, mark them unbanned so they become "known allowed" in access-lockdown mode.
   if (allowed && clientID) {
     const rec = ensureClientRecord(clientID);
-    rec.status = "unbanned";
-    rec.lastSeenAt = nowMs();
-    saveAccess();
+    if (rec) {
+      rec.status = "verified";
+      rec.verifiedAt = nowMs();
+      rec.lastSeenAt = nowMs();
+      saveAccess();
+    }
   }
 
   res.json({ ok: true, allowed });
@@ -216,10 +387,19 @@ app.post("/api/auth", (req, res) => {
 // ---- ClientID access control endpoints
 app.post("/api/check", (req, res) => {
   const clientID = normalizeStr(req.body && req.body.clientID);
-  if (clientID) ensureClientRecord(clientID);
+  if (clientID) recordClientTelemetry(req, clientID, null);
 
-  const decision = computeAccessDecision(clientID);
-  res.json({ ok: true, banned: !!decision.banned, allowed: !!decision.allowed, lockdown: !!accessStore.lockdown });
+  const decision = computeAccessDecision(req, clientID);
+
+  res.json({
+    ok: true,
+    banned: !!decision.banned,
+    allowed: !!decision.allowed,
+    lockdown: !!accessStore.lockdown,
+    status: decision.status || "unverified",
+    reason: decision.reason || "",
+    banMessage: decision.banMessage || ""
+  });
 });
 
 // POST /api/unban (banned page)
@@ -230,53 +410,172 @@ app.post("/api/unban", (req, res) => {
   const pinAttempt = normalizeStr(req.body && req.body.pinAttempt);
 
   if (!clientID) return res.status(400).json({ ok: false, error: "clientID required" });
+  recordClientTelemetry(req, clientID, null);
+
   if (!UNBAN_PIN) return res.json({ ok: true, allowed: false });
   if (pinAttempt !== UNBAN_PIN) return res.json({ ok: true, allowed: false });
 
   const rec = ensureClientRecord(clientID);
-  rec.status = "unbanned";
-  rec.lastSeenAt = nowMs();
-  saveAccess();
+  if (rec) {
+    // Unban does NOT automatically verify; it just clears ban + suspicious.
+    rec.status = "unverified";
+    rec.banMessage = "";
+    rec.lastSeenAt = nowMs();
+    saveAccess();
+  }
 
   res.json({ ok: true, allowed: true });
 });
 
-// ---- Admin endpoints for access control (ADMIN_PIN)
+// ---- Admin endpoints for user management (ADMIN_PIN)
+
+// List clients
 app.get("/api/admin/list", requirePin, (req, res) => {
-  const items = Object.entries(accessStore.clients || {}).map(([clientID, rec]) => ({
-    clientID,
-    status: rec && rec.status ? rec.status : "unbanned",
-    firstSeenAt: rec && rec.firstSeenAt ? rec.firstSeenAt : 0,
-    lastSeenAt: rec && rec.lastSeenAt ? rec.lastSeenAt : 0
-  }));
+  const items = Object.entries(accessStore.clients || {}).map(([clientID, rec]) => {
+    const r = rec && typeof rec === "object" ? rec : {};
+    const status = normalizeLegacyStatus(r.status);
+    return {
+      clientID,
+      status,
+      firstSeenAt: Number(r.firstSeenAt || 0),
+      lastSeenAt: Number(r.lastSeenAt || 0),
+      verifiedAt: Number(r.verifiedAt || 0),
+      suspiciousAt: Number(r.suspiciousAt || 0),
+
+      ipFirst: normalizeStr(r.ipFirst || ""),
+      ipLast: normalizeStr(r.ipLast || ""),
+      ipLastSeenAt: Number(r.ipLastSeenAt || 0),
+
+      ua: normalizeStr(r.ua || ""),
+      platform: normalizeStr(r.platform || ""),
+      language: normalizeStr(r.language || ""),
+      timezone: normalizeStr(r.timezone || ""),
+      screen: normalizeStr(r.screen || ""),
+
+      banMessage: normalizeStr(r.banMessage || "")
+    };
+  });
+
   items.sort((a, b) => (b.lastSeenAt || 0) - (a.lastSeenAt || 0));
-  res.json({ ok: true, lockdown: !!accessStore.lockdown, clients: items });
+  res.json({
+    ok: true,
+    lockdown: !!accessStore.lockdown,
+    clients: items,
+    ipBans: accessStore.ipBans || {}
+  });
 });
 
-app.post("/api/admin/ban", requirePin, (req, res) => {
+// Verify user
+app.post("/api/admin/verify", requirePin, (req, res) => {
   const clientID = normalizeStr(req.body && req.body.clientID);
   if (!clientID) return res.status(400).json({ ok: false, error: "clientID required" });
 
   const rec = ensureClientRecord(clientID);
-  rec.status = "banned";
+  if (!rec) return res.status(400).json({ ok: false, error: "clientID required" });
+
+  rec.status = "verified";
+  rec.verifiedAt = nowMs();
   rec.lastSeenAt = nowMs();
   saveAccess();
 
   res.json({ ok: true, status: rec.status });
 });
 
+// Mark suspicious (optional admin control)
+app.post("/api/admin/suspicious", requirePin, (req, res) => {
+  const clientID = normalizeStr(req.body && req.body.clientID);
+  if (!clientID) return res.status(400).json({ ok: false, error: "clientID required" });
+
+  const rec = ensureClientRecord(clientID);
+  if (!rec) return res.status(400).json({ ok: false, error: "clientID required" });
+
+  rec.status = "suspicious";
+  rec.suspiciousAt = nowMs();
+  rec.lastSeenAt = nowMs();
+  saveAccess();
+
+  res.json({ ok: true, status: rec.status });
+});
+
+// Clear suspicious back to unverified
+app.post("/api/admin/clear-suspicious", requirePin, (req, res) => {
+  const clientID = normalizeStr(req.body && req.body.clientID);
+  if (!clientID) return res.status(400).json({ ok: false, error: "clientID required" });
+
+  const rec = ensureClientRecord(clientID);
+  if (!rec) return res.status(400).json({ ok: false, error: "clientID required" });
+
+  if (normalizeLegacyStatus(rec.status) === "suspicious") {
+    rec.status = "unverified";
+    rec.lastSeenAt = nowMs();
+    saveAccess();
+  }
+
+  res.json({ ok: true, status: normalizeLegacyStatus(rec.status) });
+});
+
+// Ban clientID (with message)
+app.post("/api/admin/ban", requirePin, (req, res) => {
+  const clientID = normalizeStr(req.body && req.body.clientID);
+  const banMessage = clampStr(req.body && req.body.banMessage, 500);
+  if (!clientID) return res.status(400).json({ ok: false, error: "clientID required" });
+
+  const rec = ensureClientRecord(clientID);
+  rec.status = "banned";
+  rec.banMessage = banMessage;
+  rec.lastSeenAt = nowMs();
+  saveAccess();
+
+  res.json({ ok: true, status: rec.status });
+});
+
+// Unban clientID
 app.post("/api/admin/unban", requirePin, (req, res) => {
   const clientID = normalizeStr(req.body && req.body.clientID);
   if (!clientID) return res.status(400).json({ ok: false, error: "clientID required" });
 
   const rec = ensureClientRecord(clientID);
-  rec.status = "unbanned";
+  rec.status = "unverified";
+  rec.banMessage = "";
   rec.lastSeenAt = nowMs();
   saveAccess();
 
   res.json({ ok: true, status: rec.status });
 });
 
+// Ban IP (with message)
+app.post("/api/admin/ban-ip", requirePin, (req, res) => {
+  const ip = normalizeStr(req.body && req.body.ip);
+  const banMessage = clampStr(req.body && req.body.banMessage, 500);
+  if (!ip) return res.status(400).json({ ok: false, error: "ip required" });
+
+  const existing = accessStore.ipBans[ip];
+  const createdAt = existing && existing.createdAt ? Number(existing.createdAt) : nowMs();
+
+  accessStore.ipBans[ip] = {
+    message: banMessage,
+    createdAt,
+    updatedAt: nowMs()
+  };
+  saveAccess();
+
+  res.json({ ok: true, ip, banned: true });
+});
+
+// Unban IP
+app.post("/api/admin/unban-ip", requirePin, (req, res) => {
+  const ip = normalizeStr(req.body && req.body.ip);
+  if (!ip) return res.status(400).json({ ok: false, error: "ip required" });
+
+  if (accessStore.ipBans && accessStore.ipBans[ip]) {
+    delete accessStore.ipBans[ip];
+    saveAccess();
+  }
+
+  res.json({ ok: true, ip, banned: false });
+});
+
+// Access lockdown toggle
 app.post("/api/admin/lockdown", requirePin, (req, res) => {
   const enabled = !!(req.body && req.body.enabled);
   accessStore.lockdown = enabled;
@@ -286,7 +585,7 @@ app.post("/api/admin/lockdown", requirePin, (req, res) => {
 
 // ---- Broadcast + site-lockdown admin endpoints (ADMIN_PIN)
 app.post("/api/broadcast", requirePin, (req, res) => {
-  const msg = (req.body && typeof req.body.message === "string") ? req.body.message.trim() : "";
+  const msg = req.body && typeof req.body.message === "string" ? req.body.message.trim() : "";
   if (!msg) return res.status(400).json({ ok: false, error: "message required" });
 
   const createdAt = nowMs();
@@ -330,14 +629,18 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: "/ws" });
 
 function safeSend(ws, obj) {
-  try { ws.send(JSON.stringify(obj)); } catch (e) {}
+  try {
+    ws.send(JSON.stringify(obj));
+  } catch (e) {}
 }
 
 function broadcastWS(obj) {
   const msg = JSON.stringify(obj);
   for (const client of wss.clients) {
     if (client.readyState === 1) {
-      try { client.send(msg); } catch (e) {}
+      try {
+        client.send(msg);
+      } catch (e) {}
     }
   }
 }
